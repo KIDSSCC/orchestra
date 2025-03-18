@@ -18,7 +18,8 @@ from .llm import (
     GroqModels,
     TogetheraiModels,
     GeminiModels,
-    DeepseekModels
+    DeepseekModels,
+    QwenModels
 )
 from .tools import (
     FileTools,
@@ -107,6 +108,7 @@ __all__ = [
     "TogetheraiModels",
     "GeminiModels",
     "DeepseekModels",
+    "QwenModels"
 
     # List core tools
     "FileTools",

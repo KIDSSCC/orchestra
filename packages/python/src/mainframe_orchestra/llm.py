@@ -1411,6 +1411,8 @@ class DeepseekModels:
     @staticmethod
     async def send_deepseek_request(
         model: str = "",
+        base_url_envname: str = '',
+        api_key_envname: str = 'DEEPSEEK_API_KEY',
         image_data: Union[List[str], str, None] = None,
         temperature: float = 0.7,
         max_tokens: int = 4000,
@@ -1427,14 +1429,15 @@ class DeepseekModels:
 
         try:
             # Validate and retrieve the DeepSeek API key
-            api_key = config.validate_api_key("DEEPSEEK_API_KEY")
+            api_key = config.validate_api_key(api_key_envname)
             if not api_key:
                 raise ValueError("DeepSeek API key not found in environment variables.")
 
+            base_url = "https://api.deepseek.com/v1" if base_url_envname == '' else config.validate_api_key(base_url_envname)
             # Create an AsyncOpenAI client
             client = wrap_openai(AsyncOpenAI(
                 api_key=api_key,
-                base_url="https://api.deepseek.com/v1",
+                base_url=base_url,
             ))
 
             # Warn if image data was provided
@@ -1442,7 +1445,7 @@ class DeepseekModels:
                 logger.warning("Warning: DeepSeek API does not support image inputs. Images will be ignored.")
 
             # Preprocess messages only for the reasoner model
-            if messages and model == "deepseek-reasoner":
+            if messages and (model == "deepseek-reasoner" or model == "deepseek-r1"):
                 messages = DeepseekModels._preprocess_reasoner_messages(messages, require_json_output)
                 # Remove JSON requirement for reasoner model
                 require_json_output = False
@@ -1512,7 +1515,7 @@ class DeepseekModels:
             spinner.text = f"Waiting for {model} response..."
             response = await client.chat.completions.create(**request_params)
 
-            if model == "deepseek-reasoner":
+            if model == "deepseek-reasoner" or model == "deepseek-r1":
                 reasoning = response.choices[0].message.reasoning_content
                 content = response.choices[0].message.content
                 # Instead of returning a formatted string, compress the output inline
@@ -1547,7 +1550,7 @@ class DeepseekModels:
                 spinner.stop()
 
     @staticmethod
-    def custom_model(model_name: str):
+    def custom_model(model_name: str, base_url_envname: str = '', api_key_envname: str = 'DEEPSEEK_API_KEY'):
         async def wrapper(
             image_data: Union[List[str], str, None] = None,
             temperature: float = 0.7,
@@ -1558,6 +1561,8 @@ class DeepseekModels:
         ) -> Union[Tuple[str, Optional[Exception]], AsyncGenerator[str, None]]:
             return await DeepseekModels.send_deepseek_request(
                 model=model_name,
+                base_url_envname=base_url_envname,
+                api_key_envname=api_key_envname,
                 image_data=image_data,
                 temperature=temperature,
                 max_tokens=max_tokens,
@@ -1567,7 +1572,138 @@ class DeepseekModels:
             )
 
         return wrapper
-
+    
+    @staticmethod
+    def custom_address(model_name: str, base_url_envname: str = '', api_key_envname: str = 'DEEPSEEK_API_KEY'):
+        return DeepseekModels.custom_model(model_name, base_url_envname, api_key_envname)
+    
     # Model-specific methods using custom_model
     chat = custom_model("deepseek-chat")
     reasoner = custom_model("deepseek-reasoner")
+
+class QwenModels:
+    """
+    Class containing methods for interacting with Qwen models.
+    """
+
+    @staticmethod
+    async def send_qwen_request(
+        model: str = "",
+        base_url_envname: str = '',
+        api_key_envname: str = '',
+        image_data: Union[List[str], str, None] = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4000,
+        require_json_output: bool = False,
+        messages: Optional[List[Dict[str, str]]] = None,
+        stream: bool = False,
+    ) -> Union[Tuple[str, Optional[Exception]], AsyncGenerator[str, None]]:
+        """
+        Sends a request to Qwen models asynchronously.
+        """
+        spinner = Halo(text="Sending request to Qwen...", spinner="dots")
+        spinner.start()
+        try:
+            # Validate and retrieve the API key and base url
+            api_key = config.validate_api_key(api_key_envname)
+            base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1" if base_url_envname == '' \
+                else config.validate_api_key(base_url_envname)
+            # Create an AsyncOpenAI client
+            client = wrap_openai(AsyncOpenAI(
+                api_key=api_key,
+                base_url=base_url
+            ))
+            
+            # Some, but not all, Qwen models support multimodal capabilities. Here need to distinguish between specific models.
+            # if image_data:
+            #     logger.warning("Warning: Qwen API does not support image inputs. Images will be ignored.")
+
+            # Log request details
+            logger.debug(f"[LLM] Qwen ({model}) Request: {json.dumps({'messages': messages, 'temperature': temperature, 'max_tokens': max_tokens, 'require_json_output': require_json_output, 'stream': stream}, separators=(',', ':'))}")
+            request_params = {
+                "model": model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+
+            # streaming logic
+            if stream:
+                spinner.stop()  # Stop spinner before streaming
+
+                async def stream_generator():
+                    full_message = ""
+                    logger.debug("Stream started")
+                    try:
+                        response = await client.chat.completions.create(stream=True, **request_params)
+                        async for chunk in response:
+                            if chunk.choices:
+                                content = chunk.choices[0].delta.content
+                                full_message += content
+                                yield content
+                        logger.debug("Stream complete")
+                        logger.debug(f"Full message: {full_message}")
+                    except Exception as e:
+                        logger.error(f"An error occurred during streaming: {e}")
+                        yield ""
+
+                return stream_generator(), None
+
+            # Non-streaming logic
+            spinner.text = f"Waiting for {model} response..."
+            response = await client.chat.completions.create(**request_params)
+
+            # non reasoning model
+            content = response.choices[0].message.content
+            spinner.succeed("Request completed")
+            compressed_content = " ".join(content.strip().split())
+            logger.debug(f"[LLM] API Response: {compressed_content}")
+
+            if require_json_output:
+                try:
+                    return json.dumps(parse_json_response(content)), None
+                except ValueError as e:
+                    logger.error(f"Failed to parse response as JSON: {e}")
+                    return "", e
+                
+            return compressed_content, None
+
+        except Exception as e:
+            spinner.fail("Request failed")
+            logger.error(f"Unexpected error: {str(e)}")
+            return "", e
+        finally:
+            if spinner.spinner_id:  # Check if spinner is still running
+                spinner.stop()
+
+
+    @staticmethod
+    def custom_model(model_name: str, base_url_envname: str = '', api_key_envname: str = ''):
+        async def wrapper(
+            image_data: Union[List[str], str, None] = None,
+            temperature: float = 0.7,
+            max_tokens: int = 4000,
+            require_json_output: bool = False,
+            messages: Optional[List[Dict[str, str]]] = None,
+            stream: bool = False,
+        ) -> Union[Tuple[str, Optional[Exception]], AsyncGenerator[str, None]]:
+            return await QwenModels.send_qwen_request(
+                model=model_name,
+                base_url_envname=base_url_envname,
+                api_key_envname=api_key_envname,
+                image_data=image_data,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                require_json_output=require_json_output,
+                messages=messages,
+                stream=stream,
+            )
+
+        return wrapper
+    
+    @staticmethod
+    def custom_address(model_name: str, base_url_envname: str = '', api_key_envname: str = ''):
+        return QwenModels.custom_model(model_name, base_url_envname, api_key_envname)
+    
+    # Model-specific methods using custom_model
+
